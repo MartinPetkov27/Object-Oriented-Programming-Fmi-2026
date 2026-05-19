@@ -2,6 +2,28 @@
 
 ---
 
+### Cartographer
+
+Представлява картограф, участвал в създаването на карта. Съдържа:
+- `name` - име
+- `yearsExperience` - години опит
+
+Задължителни виртуални методи:
+- `string getRole() const`
+- `print() const`
+
+Конкретни наследници:
+
+| Клас | Допълнителни полета |
+|---|---|
+| `FieldSurveyor` | `string region` - регионът, в който специализира |
+| `Archivist` | `string institution` - институцията, към която принадлежи |
+| `ExpeditionLeader` | `int expeditionsLed` - брой ръководени експедиции |
+
+Картографите се споделят между карти — един и същи картограф може да е допринесъл за множество карти. Затова `Map` съдържа `vector<shared_ptr<Cartographer>>`. Копирането на карта **не** клонира картографите, а споделя същите обекти.
+
+---
+
 ### Landmark
 
 Представлява забележителност върху карта. Съдържа:
@@ -16,13 +38,16 @@
 
 Конкретни наследници:
 
-Клас - Допълнителни полета:
-- `Settlement` - `int population`
-- `Dungeon` - `int depth` (брой етажи)
-- `NaturalFeature` - `FeatureKind kind` (enum class)
-- `Ruin` - `string civilization`
+| Клас | Допълнителни полета |
+|---|---|
+| `Settlement` | `int population` |
+| `Dungeon` | `int depth` (брой етажи) |
+| `NaturalFeature` | `FeatureKind kind` (enum class) |
+| `Ruin` | `string civilization` |
 
 `FeatureKind` е `enum class` с членове: `Volcano, Forest, Lake, Bog, Mountain, Desert`.
+
+За разлика от картографите, забележителностите се **притежават** от територията — всяка `Territory` съдържа свои независими копия.
 
 ---
 
@@ -59,9 +84,9 @@ static std::unique_ptr<Landmark> create(
 
 ---
 
-### Command и EditLog
+### Command
 
-Всяка промяна на `Territory` минава през команда.
+Всяка промяна на `Territory` минава през команда. Командата получава `Territory&` в конструктора и е обвързана с нея от момента на създаването. `execute()` и `undo()` са безаргументни.
 
 ```cpp
 Command                   (абстрактен)
@@ -71,24 +96,21 @@ Command                   (абстрактен)
 ```
 
 Всяка команда реализира:
-- `execute(Territory&)`
-- `undo(Territory&)`
+- `execute()`
+- `undo()`
 - `string description() const`
-
-`EditLog` пази указател към целевата `Territory` и история от команди. Методи: `execute(unique_ptr<Command>)`, `undo()`, `printHistory()`.
-
-**Важно:** ако две карти споделят `Territory`, техните `EditLog` обекти сочат към един и същи обект - `execute()` през едната е видимо от другата.
 
 ---
 
 ### CommandFactory
 
-Командите не се конструират директно - създават се чрез `CommandFactory` по тип, зададен като стринг:
+Командите не се конструират директно - създават се чрез `CommandFactory`:
 
 ```cpp
 static std::unique_ptr<Command> create(
     const std::string& type, // "add" | "remove" | "danger"
-    const std::string& args  // зависи от типа - вижте по-долу
+    const std::string& args, // зависи от типа
+    Territory& target
 );
 ```
 
@@ -100,15 +122,27 @@ static std::unique_ptr<Command> create(
 
 Картата или **споделя** територия с други карти (`shared_ptr<Territory>`, `use_count > 1`), или **притежава** собствено копие (`use_count == 1`).
 
+Освен територия, всяка карта пази списък от картографи: `vector<shared_ptr<Cartographer>>`.
+
+`Map` управлява историята на редакциите директно чрез `vector<unique_ptr<Command>>`. Няма отделен `EditLog` клас.
+
 **Семантика на копиране и преместване:**
 
-Операция - Поведение:
-- `Copy` - Дълбоко копие -> независима карта, нова територия, нов празен лог
-- `Move` - `= default` - `Territory` остава на същия адрес в heap-а, логът остава валиден
+| Операция | `territory` | `cartographers` | история |
+|---|---|---|---|
+| `Copy` | shallow — споделена | shallow — същите картографи | не се копира — новата карта започва с празна история |
+| `Move` | `= default` | `= default` | `= default` |
 
-Метод `unlink()`: ако картата е свързана (`use_count > 1`), прави дълбоко копие на територията и пренасочва лога към новия обект. Ако вече е независима - no-op.
+Копирането на карта е изцяло **shallow** — нито територията, нито картографите се клонират.
 
-Методи: `getTerritory()`, `getLog()`, `isLinked()`, `useCount()`, `print()`.
+Метод `unlink()`: ако картата е свързана (`use_count > 1`), прави дълбоко копие **само на територията** и изчиства историята. Картографите остават споделени. Ако вече е независима - no-op.
+
+Методи:
+- `addCartographer(shared_ptr<Cartographer>)`
+- `execute(unique_ptr<Command>)` - изпълнява командата и я добавя в историята
+- `undo()` - отменя последната команда
+- `printHistory() const`
+- `getTerritory()`, `isLinked()`, `useCount()`, `print()`
 
 ---
 
@@ -119,7 +153,7 @@ static std::unique_ptr<Command> create(
 Методи:
 - `Map& addLinkedMap(title, shared_ptr<Territory>)`
 - `Map& addIndependentMap(title, Territory)`
-- `Map& copyAsIndependent(sourceTitle, newTitle)` - използва copy конструктора на `Map`
+- `Map& copyAsIndependent(sourceTitle, newTitle)` - shallow copy чрез copy ctor, после `unlink()` върху копието
 - `Map& get(title)`
 - `listMaps() const`
 
@@ -129,11 +163,12 @@ static std::unique_ptr<Command> create(
 
 Демонстрирайте следната последователност:
 
-1. Създайте споделена `Territory` "The Ashfields" с две забележителности.
-2. Добавете две **свързани** карти към нея - `"Northern Survey"` и `"Southern Survey"`.
-3. Добавете забележителност чрез лога на `"Northern Survey"`. Покажете, че `"Southern Survey"` я вижда.
-4. Копирайте `"Northern Survey"` като независима карта `"Expedition Copy"`. Отпечатайте `use_count` преди и след.
-5. Добавете забележителност към `"Expedition Copy"`. Покажете, че `"Northern Survey"` **не** я вижда.
-6. Отменете последната промяна върху `"Expedition Copy"`. Потвърдете, че забележителността е изчезнала.
-7. Извикайте `unlink()` върху `"Northern Survey"`. Отпечатайте `use_count` преди и след.
-
+1. Създайте няколко `Cartographer` обекта като `shared_ptr`.
+2. Създайте споделена `Territory` "The Ashfields" с две забележителности и прикачете картографи към картите.
+3. Добавете две **свързани** карти - `"Northern Survey"` и `"Southern Survey"`.
+4. Добавете забележителност чрез `"Northern Survey"`. Покажете, че `"Southern Survey"` я вижда.
+5. **Shallow копиране:** копирайте `"Northern Survey"` като `Map copy = north`. Покажете, че `use_count` на територията е нараснал, картографите са същите обекти, и промяна в данните е видима от всички копия.
+6. **Deep копиране:** създайте независима карта `"Expedition Copy"` чрез `copyAsIndependent`. Покажете, че `use_count` на територията не се е променил, но картографите все още са споделени (`use_count` на картограф е нараснал).
+7. Добавете забележителност към `"Expedition Copy"`. Покажете, че `"Northern Survey"` **не** я вижда.
+8. Отменете последната промяна върху `"Expedition Copy"`. Потвърдете, че забележителността е изчезнала.
+9. Извикайте `unlink()` върху `"Northern Survey"`. Отпечатайте `use_count` на територията преди и след, и потвърдете, че картографите са непроменени.
